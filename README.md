@@ -19,6 +19,7 @@ cargo build --release
 echo "MORSE 5" | ./target/release/morse --frequency=750 --timbre=piano
 ./target/release/morse --exam encode "SOS 2"
 ./target/release/morse -e d "... --- ...  ..---"
+./target/release/morse --realtime
 ```
 
 The input charset selects the direction automatically. Input containing only
@@ -46,3 +47,20 @@ timestamped path such as `audio/morse-1753334400000.ogg`; the `audio` directory
 is created automatically. Dots last one unit and dashes three; gaps within a
 letter, between letters, and between words last one, three, and seven units
 respectively.
+
+## Real-time keying mode
+
+Run `-r`, `--rt`, or `--realtime` in an interactive terminal to decode Morse
+as you key it. First select either single-key mode or double-key mode, then
+select the key or keys. In single-key mode, a press up to the configured hold
+time is a dot and a longer press is a dash. After selecting the key, enter that
+hold time in milliseconds; leave it empty for the 50 ms default. `-u` controls
+only the normal Morse gaps. In double-key mode, the
+selected dot and dash keys enter their symbols directly. A pause of three
+units ends a letter, and a pause of seven units starts a new word. The live
+line shows the Morse sequence being entered and the decoded text. Press Escape
+or Ctrl-C to end the session. Key events are read from the focused terminal,
+not globally from the operating system. Single-key mode needs a terminal that
+supports the kitty keyboard protocol (such as kitty, foot, WezTerm, or recent
+Alacritty) because it depends on key-release events; double-key mode works in
+normal terminals.

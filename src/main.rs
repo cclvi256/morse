@@ -5,9 +5,18 @@ use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
+use crossterm::{
+    cursor,
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
+    execute,
+    terminal::{self, ClearType},
+};
 use morse::{
-    InputKind, Waveform, alphanumeric_content, decode_morse, encode_text, morse_signal_count,
-    translate,
+    InputKind, MorseStreamDecoder, Waveform, alphanumeric_content, decode_morse, encode_text,
+    morse_signal_count, translate,
 };
 
 const SAMPLE_RATE: u32 = 44_100;
@@ -41,6 +50,15 @@ struct Cli {
     /// Examine encoding or decoding; accepts e/encode or d/decode
     #[arg(short = 'e', long = "exam", value_name = "MODE", ignore_case = true)]
     exam: Option<ExamDirection>,
+
+    /// Decode Morse as you key it in the focused terminal
+    #[arg(
+        short = 'r',
+        long = "rt",
+        visible_alias = "realtime",
+        conflicts_with_all = ["input", "exam", "frequency", "waveform", "output"]
+    )]
+    realtime: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -86,6 +104,9 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    if cli.realtime {
+        return run_realtime(cli.unit);
+    }
     if let Some(direction) = cli.exam {
         return run_exam(direction, &cli.input);
     }
@@ -111,6 +132,342 @@ fn run() -> Result<(), String> {
     encode_ogg(&samples, SAMPLE_RATE, &output)?;
     println!("Audio: {}", output.display());
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RealtimeKey {
+    Char(char),
+    Space,
+    Enter,
+    Tab,
+}
+
+impl RealtimeKey {
+    fn parse(value: &str) -> Result<Self, String> {
+        let value = value.trim();
+        match value.to_ascii_lowercase().as_str() {
+            "space" => Ok(Self::Space),
+            "enter" | "return" => Ok(Self::Enter),
+            "tab" => Ok(Self::Tab),
+            _ if value.chars().count() == 1 => Ok(Self::Char(
+                value
+                    .chars()
+                    .next()
+                    .expect("a one-character key must have a character"),
+            )),
+            _ => Err("enter one character, or use space, enter, or tab".into()),
+        }
+    }
+
+    fn matches(self, code: KeyCode) -> bool {
+        match (self, code) {
+            (Self::Space, KeyCode::Char(' '))
+            | (Self::Enter, KeyCode::Enter)
+            | (Self::Tab, KeyCode::Tab) => true,
+            (Self::Char(expected), KeyCode::Char(actual)) => expected.eq_ignore_ascii_case(&actual),
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for RealtimeKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Char(character) => write!(formatter, "{character}"),
+            Self::Space => formatter.write_str("space"),
+            Self::Enter => formatter.write_str("enter"),
+            Self::Tab => formatter.write_str("tab"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RealtimeMode {
+    Single { key: RealtimeKey, hold_ms: u32 },
+    Double { dot: RealtimeKey, dash: RealtimeKey },
+}
+
+struct RawMode {
+    keyboard_enhancement_enabled: bool,
+}
+
+impl RawMode {
+    fn enable(require_key_release_events: bool) -> Result<Self, String> {
+        terminal::enable_raw_mode()
+            .map_err(|error| format!("could not enable raw terminal mode: {error}"))?;
+        if !require_key_release_events {
+            return Ok(Self {
+                keyboard_enhancement_enabled: false,
+            });
+        }
+
+        let supported = terminal::supports_keyboard_enhancement().unwrap_or(false);
+        if !supported {
+            let _ = terminal::disable_raw_mode();
+            return Err(
+                "single-key mode needs a terminal with kitty keyboard protocol support to receive key-release events; choose double-key mode instead"
+                    .into(),
+            );
+        }
+        if let Err(error) = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        ) {
+            let _ = terminal::disable_raw_mode();
+            return Err(format!("could not enable key-release events: {error}"));
+        }
+        Ok(Self {
+            keyboard_enhancement_enabled: true,
+        })
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        if self.keyboard_enhancement_enabled {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+fn run_realtime(unit_ms: u32) -> Result<(), String> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err("real-time mode requires an interactive terminal".into());
+    }
+
+    let mode = choose_realtime_mode()?;
+    match mode {
+        RealtimeMode::Single { key, hold_ms } => println!(
+            "Ready. Press {key}; up to {hold_ms} ms is a dot and a longer hold is a dash. Press Escape or Ctrl-C to finish."
+        ),
+        RealtimeMode::Double { dot, dash } => println!(
+            "Ready. {dot} keys a dot and {dash} keys a dash. Press Escape or Ctrl-C to finish."
+        ),
+    }
+    let _raw_mode = RawMode::enable(matches!(mode, RealtimeMode::Single { .. }))?;
+    let mut decoder = MorseStreamDecoder::default();
+    let mut held_since: Option<Instant> = None;
+    let mut last_signal_at: Option<Instant> = None;
+    redraw_realtime(&decoder)?;
+
+    loop {
+        let now = Instant::now();
+        let single_key_is_held =
+            matches!(mode, RealtimeMode::Single { .. }) && held_since.is_some();
+        if finalize_realtime_idle(
+            &mut decoder,
+            last_signal_at,
+            now,
+            unit_ms,
+            single_key_is_held,
+        ) {
+            redraw_realtime(&decoder)?;
+        }
+
+        if !event::poll(std::time::Duration::from_millis(20))
+            .map_err(|error| format!("could not read keyboard event: {error}"))?
+        {
+            continue;
+        }
+        let Event::Key(key_event) =
+            event::read().map_err(|error| format!("could not read keyboard event: {error}"))?
+        else {
+            continue;
+        };
+        if is_exit_key(key_event) {
+            break;
+        }
+        match mode {
+            RealtimeMode::Single { key, hold_ms } => match key_event.kind {
+                KeyEventKind::Press if key.matches(key_event.code) => {
+                    held_since = Some(Instant::now())
+                }
+                KeyEventKind::Release if key.matches(key_event.code) => {
+                    if let Some(pressed_at) = held_since.take() {
+                        let held_ms = pressed_at.elapsed().as_millis() as u32;
+                        let signal = if held_ms > hold_ms { '-' } else { '.' };
+                        decoder.push_signal(signal)?;
+                        last_signal_at = Some(Instant::now());
+                        redraw_realtime(&decoder)?;
+                    }
+                }
+                _ => {}
+            },
+            RealtimeMode::Double { dot, dash } if key_event.kind == KeyEventKind::Press => {
+                let signal = if dot.matches(key_event.code) {
+                    Some('.')
+                } else if dash.matches(key_event.code) {
+                    Some('-')
+                } else {
+                    None
+                };
+                if let Some(signal) = signal {
+                    decoder.push_signal(signal)?;
+                    last_signal_at = Some(Instant::now());
+                    redraw_realtime(&decoder)?;
+                }
+            }
+            RealtimeMode::Double { .. } => {}
+        }
+    }
+
+    decoder.finish_letter();
+    execute!(
+        io::stdout(),
+        cursor::MoveToColumn(0),
+        terminal::Clear(ClearType::CurrentLine)
+    )
+    .map_err(|error| format!("could not update terminal: {error}"))?;
+    println!("Text: {}", decoder.finalized_text().trim_end());
+    Ok(())
+}
+
+fn choose_realtime_mode() -> Result<RealtimeMode, String> {
+    println!("Choose keying mode: 1) single key (short = ., long = -)  2) double key (. and -)");
+    let choice = prompt_line("Mode [1/2]: ")?;
+    match choice.trim() {
+        "1" | "single" => {
+            let key = prompt_realtime_key("Key to use [space/enter/tab or one character]: ")?;
+            let hold_ms = prompt_hold_time()?;
+            Ok(RealtimeMode::Single { key, hold_ms })
+        }
+        "2" | "double" => {
+            let dot = prompt_realtime_key("Key for dot (.): ")?;
+            let dash = prompt_realtime_key("Key for dash (-): ")?;
+            if dot == dash {
+                return Err("dot and dash must use different keys".into());
+            }
+            Ok(RealtimeMode::Double { dot, dash })
+        }
+        _ => Err("choose 1 (single key) or 2 (double key)".into()),
+    }
+}
+
+fn prompt_realtime_key(prompt: &str) -> Result<RealtimeKey, String> {
+    let key = RealtimeKey::parse(&prompt_line(prompt)?)?;
+    if matches!(key, RealtimeKey::Char('\u{1b}')) {
+        return Err("Escape is reserved for exiting real-time mode".into());
+    }
+    Ok(key)
+}
+
+fn prompt_hold_time() -> Result<u32, String> {
+    parse_hold_time(&prompt_line("Hold time in ms [50]: ")?)
+}
+
+fn parse_hold_time(value: &str) -> Result<u32, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(50);
+    }
+    let milliseconds: u32 = value
+        .parse()
+        .map_err(|_| "hold time must be a whole number of milliseconds".to_string())?;
+    if (1..=10_000).contains(&milliseconds) {
+        Ok(milliseconds)
+    } else {
+        Err("hold time must be between 1 and 10000 ms".into())
+    }
+}
+
+fn prompt_line(prompt: &str) -> Result<String, String> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("could not write prompt: {error}"))?;
+    let mut value = String::new();
+    io::stdin()
+        .read_line(&mut value)
+        .map_err(|error| format!("could not read selection: {error}"))?;
+    Ok(value)
+}
+
+fn is_exit_key(event: KeyEvent) -> bool {
+    event.code == KeyCode::Esc
+        || (event.code == KeyCode::Char('c')
+            && event
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL))
+}
+
+fn finalize_realtime_idle(
+    decoder: &mut MorseStreamDecoder,
+    last_signal_at: Option<Instant>,
+    now: Instant,
+    unit_ms: u32,
+    key_is_held: bool,
+) -> bool {
+    // The Morse gap begins after a key is released. In single-key mode a dash
+    // may itself last longer than a letter gap, so it must never trigger a
+    // separator while that key is still held.
+    if key_is_held {
+        return false;
+    }
+    let Some(last_signal_at) = last_signal_at else {
+        return false;
+    };
+    let elapsed_ms = now.duration_since(last_signal_at).as_millis() as u32;
+    if elapsed_ms >= unit_ms.saturating_mul(7) {
+        decoder.finish_word()
+    } else if elapsed_ms >= unit_ms.saturating_mul(3) {
+        decoder.finish_letter()
+    } else {
+        false
+    }
+}
+
+fn redraw_realtime(decoder: &MorseStreamDecoder) -> Result<(), String> {
+    execute!(
+        io::stdout(),
+        cursor::MoveToColumn(0),
+        terminal::Clear(ClearType::CurrentLine),
+    )
+    .map_err(|error| format!("could not update terminal: {error}"))?;
+    print!(
+        "Morse: {:<8} Text: {}",
+        decoder.morse(),
+        decoder.display_text()
+    );
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("could not update terminal: {error}"))
+}
+
+#[cfg(test)]
+mod realtime_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn held_dash_does_not_end_the_previous_letter() {
+        let mut decoder = MorseStreamDecoder::default();
+        decoder.push_signal('-').unwrap();
+        decoder.push_signal('.').unwrap();
+        let three_units_ago = Instant::now() - Duration::from_millis(300);
+
+        assert!(!finalize_realtime_idle(
+            &mut decoder,
+            Some(three_units_ago),
+            Instant::now(),
+            100,
+            true,
+        ));
+        decoder.push_signal('-').unwrap();
+        decoder.push_signal('.').unwrap();
+        decoder.finish_letter();
+        assert_eq!(decoder.finalized_text(), "C");
+    }
+
+    #[test]
+    fn default_hold_time_is_50_ms() {
+        assert_eq!(parse_hold_time("\n").unwrap(), 50);
+        assert_eq!(parse_hold_time("75").unwrap(), 75);
+        assert!(parse_hold_time("0").is_err());
+    }
 }
 
 fn run_exam(direction: ExamDirection, arguments: &[String]) -> Result<(), String> {

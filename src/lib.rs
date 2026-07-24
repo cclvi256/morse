@@ -45,6 +45,77 @@ pub enum InputKind {
     Morse,
 }
 
+/// Incrementally translates keyed Morse without requiring whitespace between
+/// letters. This is used by the terminal real-time mode and is independent of
+/// terminal event handling so its behaviour can be tested directly.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MorseStreamDecoder {
+    text: String,
+    current_code: String,
+}
+
+impl MorseStreamDecoder {
+    pub fn push_signal(&mut self, signal: char) -> Result<(), String> {
+        match signal {
+            '.' | '-' => {
+                self.current_code.push(signal);
+                Ok(())
+            }
+            other => Err(format!("invalid Morse signal '{other}'")),
+        }
+    }
+
+    /// Finalize the Morse sequence currently being keyed. Unknown sequences
+    /// are retained as `?`, allowing a real-time session to continue.
+    pub fn finish_letter(&mut self) -> bool {
+        if self.current_code.is_empty() {
+            return false;
+        }
+        let letter = MORSE_TABLE
+            .iter()
+            .find(|(_, morse)| *morse == self.current_code)
+            .map(|(letter, _)| *letter)
+            .unwrap_or('?');
+        self.text.push(letter);
+        self.current_code.clear();
+        true
+    }
+
+    pub fn finish_word(&mut self) -> bool {
+        let changed = self.finish_letter();
+        if !self.text.is_empty() && !self.text.ends_with(' ') {
+            self.text.push(' ');
+            true
+        } else {
+            changed
+        }
+    }
+
+    pub fn morse(&self) -> &str {
+        &self.current_code
+    }
+
+    /// Text decoded so far, including a tentative decoding of the Morse
+    /// sequence currently being entered.
+    pub fn display_text(&self) -> String {
+        let mut text = self.text.clone();
+        if !self.current_code.is_empty() {
+            text.push(
+                MORSE_TABLE
+                    .iter()
+                    .find(|(_, morse)| *morse == self.current_code)
+                    .map(|(letter, _)| *letter)
+                    .unwrap_or('?'),
+            );
+        }
+        text
+    }
+
+    pub fn finalized_text(&self) -> &str {
+        &self.text
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Waveform {
     Sine,
@@ -389,5 +460,33 @@ mod tests {
     fn morse_timing_is_correct() {
         // .- has 1 tone + 1 gap + 3 tone units.
         assert_eq!(synthesize(".-", 700.0, 10, Waveform::Sine, 1_000).len(), 50);
+    }
+
+    #[test]
+    fn streams_morse_as_it_is_keyed() {
+        let mut decoder = MorseStreamDecoder::default();
+        decoder.push_signal('.').unwrap();
+        decoder.push_signal('.').unwrap();
+        decoder.push_signal('.').unwrap();
+        assert_eq!(decoder.morse(), "...");
+        assert_eq!(decoder.display_text(), "S");
+        assert!(decoder.finish_letter());
+        decoder.push_signal('-').unwrap();
+        decoder.push_signal('-').unwrap();
+        decoder.push_signal('-').unwrap();
+        decoder.finish_word();
+        assert_eq!(decoder.finalized_text(), "SO ");
+    }
+
+    #[test]
+    fn streams_invalid_morse_without_stopping() {
+        let mut decoder = MorseStreamDecoder::default();
+        for signal in ".-.-.-".chars() {
+            decoder.push_signal(signal).unwrap();
+        }
+        decoder.finish_letter();
+        decoder.push_signal('.').unwrap();
+        decoder.finish_letter();
+        assert_eq!(decoder.finalized_text(), "?E");
     }
 }
