@@ -39,6 +39,8 @@ const MORSE_TABLE: &[(char, &str)] = &[
     ('9', "----."),
 ];
 
+const ERROR_PROSIGN: &str = "........";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputKind {
     Text,
@@ -71,6 +73,10 @@ impl MorseStreamDecoder {
         if self.current_code.is_empty() {
             return false;
         }
+        if self.current_code == ERROR_PROSIGN {
+            self.current_code.clear();
+            return self.text.pop().is_some();
+        }
         let letter = MORSE_TABLE
             .iter()
             .find(|(_, morse)| *morse == self.current_code)
@@ -100,13 +106,17 @@ impl MorseStreamDecoder {
     pub fn display_text(&self) -> String {
         let mut text = self.text.clone();
         if !self.current_code.is_empty() {
-            text.push(
-                MORSE_TABLE
-                    .iter()
-                    .find(|(_, morse)| *morse == self.current_code)
-                    .map(|(letter, _)| *letter)
-                    .unwrap_or('?'),
-            );
+            if self.current_code == ERROR_PROSIGN {
+                text.push('⌫');
+            } else {
+                text.push(
+                    MORSE_TABLE
+                        .iter()
+                        .find(|(_, morse)| *morse == self.current_code)
+                        .map(|(letter, _)| *letter)
+                        .unwrap_or('?'),
+                );
+            }
         }
         text
     }
@@ -488,5 +498,18 @@ mod tests {
         decoder.push_signal('.').unwrap();
         decoder.finish_letter();
         assert_eq!(decoder.finalized_text(), "?E");
+    }
+
+    #[test]
+    fn eight_dits_are_the_realtime_error_backspace_prosign() {
+        let mut decoder = MorseStreamDecoder::default();
+        decoder.push_signal('.').unwrap();
+        decoder.finish_letter();
+        for _ in 0..8 {
+            decoder.push_signal('.').unwrap();
+        }
+        assert_eq!(decoder.display_text(), "E⌫");
+        assert!(decoder.finish_letter());
+        assert_eq!(decoder.finalized_text(), "");
     }
 }

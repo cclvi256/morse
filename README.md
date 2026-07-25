@@ -68,6 +68,10 @@ terminal that supports the kitty keyboard protocol (such as kitty, foot,
 WezTerm, or recent Alacritty) because it depends on key-release events;
 double-key mode works in normal terminals.
 
+The eight-dit error/correction prosign (`........`) is supported as a realtime
+backspace: it is shown as `⌫` while being keyed and removes the last decoded
+character when the character gap is reached.
+
 ## Keyboard debugger
 
 Build the package and run `morse-keyboard-debug` in the terminal where real-time
