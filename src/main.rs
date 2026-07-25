@@ -20,6 +20,8 @@ use morse::{
 };
 
 const SAMPLE_RATE: u32 = 44_100;
+const DIT_DAH_BOUNDARY_UNITS: f64 = 1.732_050_807_568_877_2; // sqrt(3)
+const LETTER_WORD_BOUNDARY_UNITS: f64 = 4.582_575_694_955_84; // sqrt(21)
 
 #[derive(Parser, Debug)]
 #[command(
@@ -183,7 +185,7 @@ impl std::fmt::Display for RealtimeKey {
 
 #[derive(Clone, Copy, Debug)]
 enum RealtimeMode {
-    Single { key: RealtimeKey, hold_ms: u32 },
+    Single { key: RealtimeKey },
     Double { dot: RealtimeKey, dash: RealtimeKey },
 }
 
@@ -241,8 +243,9 @@ fn run_realtime(unit_ms: u32) -> Result<(), String> {
 
     let mode = choose_realtime_mode()?;
     match mode {
-        RealtimeMode::Single { key, hold_ms } => println!(
-            "Ready. Press {key}; up to {hold_ms} ms is a dot and a longer hold is a dash. Press Escape or Ctrl-C to finish."
+        RealtimeMode::Single { key } => println!(
+            "Ready. Press {key}; up to {:.1} ms is a dot and a longer hold is a dash (unit: {unit_ms} ms). Press Escape or Ctrl-C to finish.",
+            millis_for_units(unit_ms, DIT_DAH_BOUNDARY_UNITS),
         ),
         RealtimeMode::Double { dot, dash } => println!(
             "Ready. {dot} keys a dot and {dash} keys a dash. Press Escape or Ctrl-C to finish."
@@ -282,14 +285,21 @@ fn run_realtime(unit_ms: u32) -> Result<(), String> {
             break;
         }
         match mode {
-            RealtimeMode::Single { key, hold_ms } => match key_event.kind {
+            RealtimeMode::Single { key } => match key_event.kind {
                 KeyEventKind::Press if key.matches(key_event.code) => {
-                    held_since = Some(Instant::now())
+                    // Some terminals report auto-repeat as additional Press events.
+                    // The first press, not the latest repeat, defines the hold time.
+                    record_initial_press(&mut held_since, Instant::now());
                 }
                 KeyEventKind::Release if key.matches(key_event.code) => {
                     if let Some(pressed_at) = held_since.take() {
-                        let held_ms = pressed_at.elapsed().as_millis() as u32;
-                        let signal = if held_ms > hold_ms { '-' } else { '.' };
+                        let signal = if pressed_at.elapsed()
+                            > duration_for_units(unit_ms, DIT_DAH_BOUNDARY_UNITS)
+                        {
+                            '-'
+                        } else {
+                            '.'
+                        };
                         decoder.push_signal(signal)?;
                         last_signal_at = Some(Instant::now());
                         redraw_realtime(&decoder)?;
@@ -332,8 +342,7 @@ fn choose_realtime_mode() -> Result<RealtimeMode, String> {
     match choice.trim() {
         "1" | "single" => {
             let key = prompt_realtime_key("Key to use [space/enter/tab or one character]: ")?;
-            let hold_ms = prompt_hold_time()?;
-            Ok(RealtimeMode::Single { key, hold_ms })
+            Ok(RealtimeMode::Single { key })
         }
         "2" | "double" => {
             let dot = prompt_realtime_key("Key for dot (.): ")?;
@@ -353,25 +362,6 @@ fn prompt_realtime_key(prompt: &str) -> Result<RealtimeKey, String> {
         return Err("Escape is reserved for exiting real-time mode".into());
     }
     Ok(key)
-}
-
-fn prompt_hold_time() -> Result<u32, String> {
-    parse_hold_time(&prompt_line("Hold time in ms [50]: ")?)
-}
-
-fn parse_hold_time(value: &str) -> Result<u32, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(50);
-    }
-    let milliseconds: u32 = value
-        .parse()
-        .map_err(|_| "hold time must be a whole number of milliseconds".to_string())?;
-    if (1..=10_000).contains(&milliseconds) {
-        Ok(milliseconds)
-    } else {
-        Err("hold time must be between 1 and 10000 ms".into())
-    }
 }
 
 fn prompt_line(prompt: &str) -> Result<String, String> {
@@ -410,14 +400,26 @@ fn finalize_realtime_idle(
     let Some(last_signal_at) = last_signal_at else {
         return false;
     };
-    let elapsed_ms = now.duration_since(last_signal_at).as_millis() as u32;
-    if elapsed_ms >= unit_ms.saturating_mul(7) {
+    let elapsed = now.duration_since(last_signal_at);
+    if elapsed >= duration_for_units(unit_ms, LETTER_WORD_BOUNDARY_UNITS) {
         decoder.finish_word()
-    } else if elapsed_ms >= unit_ms.saturating_mul(3) {
+    } else if elapsed >= duration_for_units(unit_ms, DIT_DAH_BOUNDARY_UNITS) {
         decoder.finish_letter()
     } else {
         false
     }
+}
+
+fn duration_for_units(unit_ms: u32, units: f64) -> std::time::Duration {
+    std::time::Duration::from_secs_f64(f64::from(unit_ms) * units / 1_000.0)
+}
+
+fn record_initial_press(held_since: &mut Option<Instant>, pressed_at: Instant) {
+    held_since.get_or_insert(pressed_at);
+}
+
+fn millis_for_units(unit_ms: u32, units: f64) -> f64 {
+    f64::from(unit_ms) * units
 }
 
 fn redraw_realtime(decoder: &MorseStreamDecoder) -> Result<(), String> {
@@ -463,10 +465,62 @@ mod realtime_tests {
     }
 
     #[test]
-    fn default_hold_time_is_50_ms() {
-        assert_eq!(parse_hold_time("\n").unwrap(), 50);
-        assert_eq!(parse_hold_time("75").unwrap(), 75);
-        assert!(parse_hold_time("0").is_err());
+    fn geometric_mean_boundaries_separate_morse_timings() {
+        let unit = 100;
+        assert_eq!(
+            duration_for_units(unit, DIT_DAH_BOUNDARY_UNITS).as_millis(),
+            173
+        );
+        assert_eq!(
+            duration_for_units(unit, LETTER_WORD_BOUNDARY_UNITS).as_millis(),
+            458
+        );
+    }
+
+    #[test]
+    fn geometric_mean_gap_ends_letters_and_words() {
+        let now = Instant::now();
+        let mut decoder = MorseStreamDecoder::default();
+        decoder.push_signal('.').unwrap();
+
+        assert!(!finalize_realtime_idle(
+            &mut decoder,
+            Some(now - Duration::from_millis(170)),
+            now,
+            100,
+            false,
+        ));
+        assert!(finalize_realtime_idle(
+            &mut decoder,
+            Some(now - Duration::from_millis(180)),
+            now,
+            100,
+            false,
+        ));
+        assert_eq!(decoder.finalized_text(), "E");
+        assert!(finalize_realtime_idle(
+            &mut decoder,
+            Some(now - Duration::from_millis(460)),
+            now,
+            100,
+            false,
+        ));
+        assert_eq!(decoder.finalized_text(), "E ");
+    }
+
+    #[test]
+    fn repeated_press_does_not_shorten_a_hold() {
+        let pressed_at = Instant::now();
+        let mut held_since = None;
+        record_initial_press(&mut held_since, pressed_at);
+        record_initial_press(&mut held_since, pressed_at + Duration::from_millis(250));
+
+        assert_eq!(held_since, Some(pressed_at));
+        let release_at = pressed_at + Duration::from_millis(250);
+        assert!(
+            release_at.duration_since(held_since.unwrap())
+                > duration_for_units(100, DIT_DAH_BOUNDARY_UNITS)
+        );
     }
 }
 

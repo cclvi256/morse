@@ -20,6 +20,7 @@ echo "MORSE 5" | ./target/release/morse --frequency=750 --timbre=piano
 ./target/release/morse --exam encode "SOS 2"
 ./target/release/morse -e d "... --- ...  ..---"
 ./target/release/morse --realtime
+./target/release/morse-keyboard-debug
 ```
 
 The input charset selects the direction automatically. Input containing only
@@ -52,15 +53,38 @@ respectively.
 
 Run `-r`, `--rt`, or `--realtime` in an interactive terminal to decode Morse
 as you key it. First select either single-key mode or double-key mode, then
-select the key or keys. In single-key mode, a press up to the configured hold
-time is a dot and a longer press is a dash. After selecting the key, enter that
-hold time in milliseconds; leave it empty for the 50 ms default. `-u` controls
-only the normal Morse gaps. In double-key mode, the
-selected dot and dash keys enter their symbols directly. A pause of three
-units ends a letter, and a pause of seven units starts a new word. The live
-line shows the Morse sequence being entered and the decoded text. Press Escape
-or Ctrl-C to end the session. Key events are read from the focused terminal,
-not globally from the operating system. Single-key mode needs a terminal that
-supports the kitty keyboard protocol (such as kitty, foot, WezTerm, or recent
-Alacritty) because it depends on key-release events; double-key mode works in
-normal terminals.
+select the key or keys. `-u` selects the Morse time unit for all real-time
+timing. In single-key mode, a hold at or below `sqrt(3) * unit` is a dot and a
+longer hold is a dash; this is the geometric-mean boundary between a one-unit
+dot and a three-unit dash. The original press timestamp is retained while a key
+is held, so keyboard auto-repeat cannot shorten a long hold. In double-key
+mode, the selected dot and dash keys enter their symbols directly. Pauses use
+the same geometric-mean principle: `sqrt(3) * unit` separates intra-letter
+from letter gaps, and `sqrt(21) * unit` separates letter from word gaps. The
+live line shows the Morse sequence being entered and the decoded text. Press
+Escape or Ctrl-C to end the session. Key events are read from the focused
+terminal, not globally from the operating system. Single-key mode needs a
+terminal that supports the kitty keyboard protocol (such as kitty, foot,
+WezTerm, or recent Alacritty) because it depends on key-release events;
+double-key mode works in normal terminals.
+
+## Keyboard debugger
+
+Build the package and run `morse-keyboard-debug` in the terminal where real-time
+mode has trouble:
+
+```sh
+cargo build --release
+./target/release/morse-keyboard-debug --unit 80
+```
+
+The debugger prints every parsed keyboard event with its event kind, key code,
+modifiers, keyboard state, time since the previous event, and measured hold
+duration. On release it applies the same `sqrt(3) * unit` threshold as
+single-key real-time mode and prints `dit (.)` or `dah (-)`. It also warns about duplicate presses,
+repeats without a press, releases without a press, and keys whose release was
+never observed. Press Ctrl-C to exit.
+
+Keyboard enhancement defaults to `auto`. Use `--enhancement force` to request
+the kitty keyboard protocol when terminal support detection is wrong, or
+`--enhancement off` to inspect the terminal's unenhanced event stream.
