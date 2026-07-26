@@ -1,10 +1,12 @@
-[package]
-name = "morse"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "English/digit and Morse code translator with OGG audio output"
 license = "Apache-2.0"
 
-[dependencies]
+[workspace.dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 crossterm = "0.28"

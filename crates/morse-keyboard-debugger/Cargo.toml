@@ -1,0 +1,15 @@
+[package]
+name = "morse-keyboard-debugger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal keyboard-event debugger for Morse keying"
+readme = "../../README.md"
+
+[[bin]]
+name = "morse-keyboard-debug"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+crossterm.workspace = true

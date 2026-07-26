@@ -205,6 +205,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "morse-keyboard-debugger"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crossterm",
+]
+
+[[package]]
 name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

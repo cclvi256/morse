@@ -3,6 +3,22 @@
 A command-line English/digit to Morse translator (and Morse to English/digit
 translator) that also renders the message as OGG Vorbis audio.
 
+## Workspace layout
+
+This repository is a Cargo workspace with two packages:
+
+- `morse`: the reusable Morse library and the main `morse` CLI.
+- `morse-keyboard-debugger`: the standalone `morse-keyboard-debug` terminal
+  diagnostics CLI.
+
+Run the whole workspace with `cargo build --workspace` or
+`cargo test --workspace`. To run a particular package from the workspace root:
+
+```sh
+cargo run -p morse -- "SOS"
+cargo run -p morse-keyboard-debugger --bin morse-keyboard-debug
+```
+
 ## Requirements
 
 - Rust 1.85 or newer
@@ -11,7 +27,7 @@ translator) that also renders the message as OGG Vorbis audio.
 ## Build and use
 
 ```sh
-cargo build --release
+cargo build --workspace --release
 ./target/release/morse "Hello 2026"
 ./target/release/morse ".... . .-.. .-.. ---  ..--- ----- ..--- -...."
 ./target/release/morse -- "-..."  # use -- when Morse begins with a dash
@@ -78,7 +94,7 @@ Build the package and run `morse-keyboard-debug` in the terminal where real-time
 mode has trouble:
 
 ```sh
-cargo build --release
+cargo build --workspace --release
 ./target/release/morse-keyboard-debug --unit 80
 ```
 

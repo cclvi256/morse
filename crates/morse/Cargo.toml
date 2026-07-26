@@ -1,0 +1,11 @@
+[package]
+name = "morse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "English/digit and Morse code translator with OGG audio output"
+readme = "../../README.md"
+
+[dependencies]
+clap.workspace = true
+crossterm.workspace = true

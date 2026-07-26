@@ -21,7 +21,7 @@ target
 #.idea/
 
 # Copied binaries
-morse
+/morse
 
 # Audio output dir
 audio/
